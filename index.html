@@ -181,6 +181,34 @@
   </div>
 
 <script>
+/* Config loader (API_BASE, ADMIN_SECRET) */
+let API_BASE = '';
+let ADMIN_SECRET = '';
+const FALLBACK_API_BASE = 'https://script.google.com/macros/s/AKfycbzwq1KxuKLWnP5x9y7M3sgLuT1tLC1G-xUA4Z4KO1-7ohA4MkBFpdvgKE5n8FTGlJJzKw/exec';
+async function loadConfig() {
+  try {
+    const res = await fetch('config.json', { cache: 'no-cache' });
+    if (res.ok) {
+      const cfg = await res.json();
+      API_BASE = (cfg.API_BASE||'').trim();
+      ADMIN_SECRET = (cfg.ADMIN_SECRET||'').trim();
+    }
+  } catch {}
+  // fallback to localStorage
+  if (!API_BASE) { try { API_BASE = (localStorage.getItem('API_BASE')||'').trim(); } catch {} }
+  if (!ADMIN_SECRET) { try { ADMIN_SECRET = (localStorage.getItem('ADMIN_SECRET')||'').trim(); } catch {} }
+  if (!API_BASE) { API_BASE = FALLBACK_API_BASE; }
+}
+
+async function getAdminSecret(){
+  if (ADMIN_SECRET) return ADMIN_SECRET;
+  const s = prompt('Inserisci ADMIN SECRET');
+  if (!s) return '';
+  ADMIN_SECRET = s.trim();
+  try { localStorage.setItem('ADMIN_SECRET', ADMIN_SECRET); } catch {}
+  return ADMIN_SECRET;
+}
+
 /* Safe localStorage fallback (iOS Private/WhatsApp WebView) */
 (function(){
   var ok = true; var mem = {};
@@ -336,7 +364,9 @@ function dayAvail(dayObj){
   return state.avail[dayObj.name];
 }
 
-function renderCalendar(){
+async function renderCalendar(){
+  // Load remote availability/bookings before rendering
+  await syncWeekData();
   renderWeekInfo();
   const weekDays = buildWeekDays();
   // build full set of slot times union across weekdays
@@ -425,7 +455,7 @@ function renderCalendar(){
   }
 
 /* confirm booking */
-  document.getElementById('confirmBooking').addEventListener('click', (e)=>{
+  document.getElementById('confirmBooking').addEventListener('click', async (e)=>{
     e.preventDefault();
     if(!currentSelection) return alert('Seleziona prima uno slot dal calendario.');
     const name = document.getElementById('name').value.trim();
@@ -440,24 +470,27 @@ function renderCalendar(){
     const startIndex = baseSlots.indexOf(currentSelection.time);
     if(startIndex === -1) return alert('Slot non valido.');
     const needed = duration/30;
-    // check availability for all
-    for(let i=0;i<needed;i++){
-      const t = baseSlots[startIndex + i];
-      if(!t) return alert('La durata supera la disponibilità di quel giorno.');
-      const key = `${day.ymd}_${day.name}_${t}`;
-      if(bookings[key]) return alert('Uno degli slot necessari è già prenotato.');
+    // call backend
+    try {
+      const wk = formatDate(startOfISOWeek(day.date));
+      const res = await fetch(API_BASE, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          action:'book', week_start:wk, date_ymd:day.ymd, day_name:day.name,
+          start_time: currentSelection.time, duration, name, email, phone, reason
+        })
+      });
+      const out = await res.json();
+      if(!out || !out.ok){
+        const msg = (out && out.error) || 'Errore prenotazione';
+        return alert(msg);
+      }
+      alert('Prenotazione confermata!');
+      await syncWeekData(true);
+      await renderCalendar();
+    } catch(err){
+      alert('Errore di rete');
     }
-    // book them
-    const created = new Date().toISOString();
-    for(let i=0;i<needed;i++){
-      const t = baseSlots[startIndex + i];
-      const key = `${day.ymd}_${day.name}_${t}`;
-      bookings[key] = {name, phone, email, duration, reason, created};
-    }
-    // persist and update UI regardless of share outcome
-    try { localStorage.setItem(STORAGE_KEY_BOOK, JSON.stringify(bookings)); } catch {}
-    alert('Prenotazione confermata!');
-    renderCalendar();
     document.getElementById('bookingForm').reset();
     clearSelection();
   });
@@ -538,7 +571,7 @@ function renderCalendar(){
     const pass = document.getElementById('delAdminPass');
     const err = document.getElementById('delError');
     if (btnCancel) btnCancel.addEventListener('click', hideDeleteModal);
-    if (btnConfirm) btnConfirm.addEventListener('click', ()=>{
+    if (btnConfirm) btnConfirm.addEventListener('click', async ()=>{
       if (!__delCtx) return hideDeleteModal();
       const inputEmail = (email.value||'').trim().toLowerCase();
       const inputPhone = (phone && phone.value ? phone.value : '').replace(/\D/g,'');
@@ -548,11 +581,21 @@ function renderCalendar(){
         || (inputEmail && inputEmail===(__delCtx.booking.email||'').trim().toLowerCase())
         || (inputPhone && storedPhone && inputPhone===storedPhone);
       if (!ok) { err.textContent = 'Credenziali non valide.'; return; }
-      // Delete all keys
-      __delCtx.keys.forEach(k=>{ delete bookings[k]; });
-      localStorage.setItem(STORAGE_KEY_BOOK, JSON.stringify(bookings));
+      try {
+        const dayObj = __delCtx.dayObj;
+        const res = await fetch(API_BASE, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            action:'delete', date_ymd: dayObj.ymd, day_name: dayObj.name, time: __delCtx.time,
+            email: inputEmail, phone: inputPhone, admin_secret: (inputPass===ADMIN_PASS? await getAdminSecret(): '')
+          })
+        });
+        const out = await res.json();
+        if(!out || !out.ok){ err.textContent = (out && out.error) || 'Errore'; return; }
+      } catch(e){ err.textContent='Errore di rete'; return; }
+      await syncWeekData(true);
       hideDeleteModal();
-      renderCalendar();
+      await renderCalendar();
     });
     // Keyboard handling
     document.addEventListener('keydown', (e)=>{
@@ -594,7 +637,7 @@ function renderCalendar(){
 
 /* admin update */
 const ADMIN_PASS = 'valerio2025';
-document.getElementById('updateAvail').addEventListener('click', ()=>{
+document.getElementById('updateAvail').addEventListener('click', async ()=>{
   const pass = document.getElementById('adminPassword').value;
   if(pass !== ADMIN_PASS) return alert('Password errata.');
   const day = document.getElementById('adminDay').value;
@@ -610,34 +653,37 @@ document.getElementById('updateAvail').addEventListener('click', ()=>{
   } else {
     newVal = [start,end];
   }
-  if(weekOnly){
-    const wk = getWeekKey(currentWeekStart);
-    if(!state.weekOverrides) state.weekOverrides = {};
-    if(!state.weekOverrides[wk]) state.weekOverrides[wk] = {};
-    state.weekOverrides[wk][day] = newVal;
-    localStorage.setItem(STORAGE_KEY_AVAIL_WEEK, JSON.stringify(state.weekOverrides));
-  } else {
-    state.avail[day] = newVal;
-    localStorage.setItem(STORAGE_KEY_AVAIL, JSON.stringify(state.avail));
-  }
-  alert(`Disponibilità aggiornata ${weekOnly?`(solo settimana ${weekNumber(currentWeekStart)})`:''}: ${day} ${start} - ${end}${(start2&&end2)?` e ${start2} - ${end2}`:''}`);
-  renderCalendar();
+  try {
+    const payload = { action:'avail_update', admin_secret: ADMIN_SECRET, day_name: day, intervals: newVal };
+    if(weekOnly){ payload.scope='week'; payload.week_start=getWeekKey(currentWeekStart); }
+    else { payload.scope='default'; }
+    payload.admin_secret = await getAdminSecret();
+    const res = await fetch(API_BASE, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const out = await res.json();
+    if(!out || !out.ok) return alert((out&&out.error)||'Errore update');
+    alert(`Disponibilità aggiornata ${weekOnly?`(solo settimana ${weekNumber(currentWeekStart)})`:''}: ${day} ${start} - ${end}${(start2&&end2)?` e ${start2} - ${end2}`:''}`);
+    await syncWeekData(true);
+    await renderCalendar();
+  } catch(e){ alert('Errore di rete'); }
 });
-document.getElementById('resetDefault').addEventListener('click', ()=>{
+document.getElementById('resetDefault').addEventListener('click', async ()=>{
   if(!confirm('Ripristinare le disponibilità predefinite?')) return;
-  state.avail = JSON.parse(JSON.stringify(DEFAULT_AVAIL));
-  localStorage.setItem(STORAGE_KEY_AVAIL, JSON.stringify(state.avail));
-  renderCalendar();
+  try {
+    const res = await fetch(API_BASE, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'avail_reset', admin_secret: await getAdminSecret(), scope:'default' }) });
+    const out = await res.json(); if(!out||!out.ok) return alert('Errore reset');
+    await syncWeekData(true);
+    await renderCalendar();
+  } catch(e){ alert('Errore di rete'); }
 });
-
-document.getElementById('resetWeek').addEventListener('click', ()=>{
+document.getElementById('resetWeek').addEventListener('click', async ()=>{
   if(!confirm('Rimuovere le disponibilità personalizzate della settimana corrente?')) return;
-  const wk = getWeekKey(currentWeekStart);
-  if(state.weekOverrides && state.weekOverrides[wk]){
-    delete state.weekOverrides[wk];
-    localStorage.setItem(STORAGE_KEY_AVAIL_WEEK, JSON.stringify(state.weekOverrides));
-  }
-  renderCalendar();
+  try {
+    const wk = getWeekKey(currentWeekStart);
+    const res = await fetch(API_BASE, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'avail_reset', admin_secret: await getAdminSecret(), scope:'week', week_start: wk }) });
+    const out = await res.json(); if(!out||!out.ok) return alert('Errore reset settimana');
+    await syncWeekData(true);
+    await renderCalendar();
+  } catch(e){ alert('Errore di rete'); }
 });
 
 /* export bookings */
@@ -905,6 +951,58 @@ try { renderCalendar(); } catch(e){ if(window.__showErr) window.__showErr(e.mess
 document.addEventListener('DOMContentLoaded', function(){
   try { renderCalendar(); } catch(e){ if(window.__showErr) window.__showErr(e.message||String(e)); }
 });
+
+/* Remote sync: availability + bookings via Apps Script */
+async function apiGetWeek(fromYmd, toYmd){
+  const url = `${API_BASE}?path=week&from=${encodeURIComponent(fromYmd)}&to=${encodeURIComponent(toYmd)}`;
+  const res = await fetch(url, { cache:'no-cache' });
+  if(!res.ok) throw new Error('net');
+  return res.json();
+}
+async function apiGetAvail(weekStartYmd){
+  const url = `${API_BASE}?path=avail&week_start=${encodeURIComponent(weekStartYmd)}`;
+  const res = await fetch(url, { cache:'no-cache' });
+  if(!res.ok) throw new Error('net');
+  return res.json();
+}
+function toYmd(d){ return formatDate(d); }
+let __lastSyncKey = '';
+async function syncWeekData(force){
+  if(!API_BASE){ await loadConfig(); }
+  if(!API_BASE) return; // stay offline if not configured
+  const wkStart = startOfISOWeek(currentWeekStart);
+  const fromYmd = toYmd(wkStart);
+  const toYmd = toYmd(addDays(wkStart,4));
+  const syncKey = fromYmd+'|'+toYmd;
+  if(!force && __lastSyncKey===syncKey && __lastBookingsSnapshot===JSON.stringify(bookings)) return;
+  try {
+    const [avail, week] = await Promise.all([
+      apiGetAvail(fromYmd),
+      apiGetWeek(fromYmd, toYmd)
+    ]);
+    if(avail && avail.ok){
+      // map defaults
+      state.avail = {};
+      Object.keys(DEFAULT_AVAIL).forEach(day=>{ state.avail[day] = avail.defaults && avail.defaults[day] != null ? avail.defaults[day] : DEFAULT_AVAIL[day]; });
+      // map overrides
+      const wk = fromYmd;
+      state.weekOverrides = state.weekOverrides || {};
+      state.weekOverrides[wk] = avail.overrides || {};
+    }
+    if(week && week.ok){
+      bookings = {};
+      (week.bookings||[]).forEach(r=>{
+        const key = `${r.date_ymd}_${r.day_name}_${r.time}`;
+        bookings[key] = {name:r.name,email:r.email,phone:r.phone,reason:r.reason,duration:r.duration,created:r.created_iso};
+      });
+      try { localStorage.setItem(STORAGE_KEY_BOOK, JSON.stringify(bookings)); } catch{}
+    }
+    __lastSyncKey = syncKey;
+    __lastBookingsSnapshot = JSON.stringify(bookings);
+  } catch {}
+}
+let __lastBookingsSnapshot = '';
+setInterval(()=>{ syncWeekData(false).then(()=>{ /* if changes, re-render */ const snap = JSON.stringify(bookings); if(snap!==__lastBookingsSnapshot){ __lastBookingsSnapshot=snap; try{ renderCalendar(); } catch{} } }); }, 10000);
 </script>
 </body>
 </html>

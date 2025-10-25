@@ -11,3 +11,6 @@ build/
 
 # Node (not used, but safe defaults)
 node_modules/
+
+# Local config (do not commit)
+config.json
