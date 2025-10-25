@@ -385,6 +385,13 @@ async function renderCalendar(){
     const _times = new Set();
     weekDays.forEach(d=>{ daySlots(dayAvail(d)).forEach(s=>_times.add(s)); });
     slotTimes = Array.from(_times).sort((a,b)=>a.localeCompare(b));
+    // Force final fallback if still empty
+    if (slotTimes.length===0) {
+      state.avail = JSON.parse(JSON.stringify(DEFAULT_AVAIL));
+      slotTimes = [];
+      weekDays.forEach(d=>{ daySlots(state.avail[d.name]).forEach(s=>slotTimes.push(s)); });
+      slotTimes = Array.from(new Set(slotTimes)).sort((a,b)=>a.localeCompare(b));
+    }
   }
   // no left times column
 
@@ -999,7 +1006,12 @@ async function syncWeekData(force){
     }
     __lastSyncKey = syncKey;
     __lastBookingsSnapshot = JSON.stringify(bookings);
-  } catch {}
+  } catch {
+    // Hard fallback to defaults if API fails
+    if (!state.avail || Object.keys(state.avail||{}).length===0) {
+      state.avail = JSON.parse(JSON.stringify(DEFAULT_AVAIL));
+    }
+  }
 }
 let __lastBookingsSnapshot = '';
 setInterval(()=>{ syncWeekData(false).then(()=>{ /* if changes, re-render */ const snap = JSON.stringify(bookings); if(snap!==__lastBookingsSnapshot){ __lastBookingsSnapshot=snap; try{ renderCalendar(); } catch{} } }); }, 10000);
