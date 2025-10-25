@@ -1,0 +1,13 @@
+# General
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Build outputs (none expected for static site)
+dist/
+build/
+
+# Node (not used, but safe defaults)
+node_modules/
